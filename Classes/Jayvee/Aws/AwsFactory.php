@@ -6,7 +6,9 @@ namespace Jayvee\Aws;
  *                                                                        */
 
 use TYPO3\Flow\Annotations as Flow;
-use Aws\Common\Aws;
+use Aws\Sdk;
+use Aws\Credentials\Credentials;
+use Aws\Credentials\CredentialProvider;
 
 /**
  * The Aws Factory provides a convenient way to create clients for the
@@ -17,9 +19,9 @@ use Aws\Common\Aws;
 class AwsFactory {
 
 	/**
-	 * @var \Aws\Common\Aws
+	 * @var \Aws\Sdk
 	 */
-	protected $aws;
+	protected $awsSdk;
 
 	/**
 	 * @var array
@@ -30,25 +32,40 @@ class AwsFactory {
 	 * @param array $settings
 	 * @return void
 	 */
-	public function injectSettings( array $settings ) {
+	public function injectSettings(array $settings) {
 		$this->settings = $settings;
 	}
 
 	/**
-	 * Initalize the service locator
+	 * Initalize the aws factory
 	 */
 	public function initializeObject() {
-		$this->aws = Aws::factory($this->settings);
+		if (isset($this->settings['key']) && isset($this->settings['secret'])) {
+			$key = $this->settings['key'];
+			$secret = $this->settings['secret'];
+			$credentialProvider = CredentialProvider::fromCredentials(new Credentials($key, $secret));
+		} else {
+			$credentialProvider = CredentialProvider::defaultProvider();
+		}
+
+		$region = isset($this->settings['region']) ? $this->settings['region'] : 'eu-east-1';
+		$config = array(
+			'region'  => $region,
+    		'version' => 'latest',
+    		'credentials' => $credentialProvider
+    	);
+		$this->awsSdk = new Sdk($config);
 	}
 
 	/**
 	 * Creates a client instance for the specified service name
 	 *
-	 * @param string $serviceName
-	 * @return \Aws\Common\Client\AwsClientInterface
+	 * @param string $name
+	 * @param array $options
+	 * @return \Aws\AwsClientInterface
 	 */
-	public function create($serviceName) {
-		return $this->aws->get($serviceName);
+	public function create($name, array $options = array()) {
+		return $this->awsSdk->createClient($name, $options);
 	}
 
 }

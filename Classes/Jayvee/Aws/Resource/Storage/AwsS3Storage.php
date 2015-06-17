@@ -12,13 +12,13 @@ use TYPO3\Flow\Resource\Resource;
 /**
  * A resource storage based on Aws S3
  */
-class AwsS3Storage implements \TYPO3\Flow\Resource\Storage\StorageInterface {
+class AwsS3Storage implements \TYPO3\Flow\Resource\Storage\WritableStorageInterface {
 
 	/**
-     * Name which identifies this resource storage
-     *
-     * @var string
-     */
+	 * Name which identifies this resource storage
+	 *
+	 * @var string
+	 */
 	protected $name;
 
 	/**
@@ -50,17 +50,17 @@ class AwsS3Storage implements \TYPO3\Flow\Resource\Storage\StorageInterface {
 	public function __construct($name, array $options = array()) {
 		$this->name = $name;
 
-	    foreach ($options as $key => $value) {
-    		switch ($key) {
-	            case 'bucketName':
-                    $this->$key = $value;
-                    break;
-                default:
-                    if ($value !== NULL) {
-                        throw new Exception(sprintf('An unknown option "%s" was specified in the configuration of a resource AwsS3Storage. Please check your settings.', $key), 1361533187);
-                    }
-            }
-        }
+		foreach ($options as $key => $value) {
+			switch ($key) {
+				case 'bucketName':
+					$this->$key = $value;
+					break;
+				default:
+					if ($value !== NULL) {
+						throw new Exception(sprintf('An unknown option "%s" was specified in the configuration of a resource AwsS3Storage. Please check your settings.', $key), 1361533187);
+					}
+			}
+		}
 	}
 
 	/**
@@ -70,7 +70,7 @@ class AwsS3Storage implements \TYPO3\Flow\Resource\Storage\StorageInterface {
 	 * @api
 	 */
 	public function getName() {
-
+		return $this->name;
 	}
 
 	/**
@@ -115,6 +115,48 @@ class AwsS3Storage implements \TYPO3\Flow\Resource\Storage\StorageInterface {
 	 * @api
 	 */
 	public function getObjectsByCollection(CollectionInterface $collection) {
+
+	}
+
+	/**
+	 * Imports a resource (file) from the given URI or PHP resource stream into this storage.
+	 *
+	 * On a successful import this method returns a Resource object representing the newly imported persistent resource.
+	 *
+	 * @param string | resource $source The URI (or local path and filename) or the PHP resource stream to import the resource from
+	 * @param string $collectionName Name of the collection the new Resource belongs to
+	 * @throws Exception
+	 * @return Resource A resource object representing the imported resource
+	 */
+	public function importResource($source, $collectionName) {
+
+	}
+
+	/**
+	 * Imports a resource from the given string content into this storage.
+	 *
+	 * On a successful import this method returns a Resource object representing the newly
+	 * imported persistent resource.
+	 *
+	 * The specified filename will be used when presenting the resource to a user. Its file extension is
+	 * important because the resource management will derive the IANA Media Type from it.
+	 *
+	 * @param string $content The actual content to import
+	 * @param string $collectionName Name of the collection the new Resource belongs to
+	 * @return Resource A resource object representing the imported resource
+	 * @throws Exception
+	 */
+	public function importResourceFromContent($content, $collectionName) {
+
+	}
+
+	/**
+	 * Deletes the storage data related to the given Resource object
+	 *
+	 * @param \TYPO3\Flow\Resource\Resource $resource The Resource to delete the storage data of
+	 * @return boolean TRUE if removal was successful
+	 */
+	public function deleteResource(Resource $resource) {
 
 	}
 
