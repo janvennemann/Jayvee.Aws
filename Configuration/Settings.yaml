@@ -1,3 +1,15 @@
+#                                                                        #
+# Settings Configuration for the Pixur Aws package                       #
+#                                                                        #
+# Production Context                                                     #
+#                                                                        #
+
+Jayvee:
+  Aws:
+    key:
+    secret:
+    region:
+
 TYPO3:
   Flow:
     object:
