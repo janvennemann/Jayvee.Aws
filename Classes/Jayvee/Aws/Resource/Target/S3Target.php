@@ -14,7 +14,7 @@ use TYPO3\Flow\Resource\ResourceMetaDataInterface;
 /**
  * A target which publishes resources to a specific bucket on Aws S3
  */
-class AwsS3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
+class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 
 	/**
 	 * Name which identifies this publishing target
@@ -29,16 +29,25 @@ class AwsS3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @var string
 	 */
 	protected $bucketName;
-
+	
 	/**
-	 * The CNAME of the CloudFront distribution to use for URI generation
-	 *
-	 * If you do not have enabled a CloudFront distribution for your bucket,
-	 * leave this option empty. The links will point directly to the bucket if not set.
-	 *
+	 * CloudFront distribution domain name or CNAME
+	 * 
 	 * @var string
 	 */
-	protected $cloudFrontCname;
+	protected $cloudFrontDomainName;
+	
+	/**
+	 * Default ACL for new bucket objects. Change this to private if you
+	 * want to use CloudFront with and origin access identity
+	 */
+	protected $objectAcl = 'public-read';
+	
+	/**
+	 * @Flow\Inject
+	 * @var \TYPO3\Flow\Resource\ResourceRepository
+	 */
+	protected $resourceRepository;
 
 	/**
 	 * @Flow\Inject
@@ -65,8 +74,10 @@ class AwsS3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 		if (!isset($options['bucketName'])) {
 			throw new \Jayvee\Aws\Resource\Exception\InvalidBucketException('You must specify a bucket name for this storage with the "bucketName" option.', 1434532112);
 		}
-
 		$this->bucketName = $options['bucketName'];
+		
+		$this->cloudFrontDomainName = isset($options['cloudFrontDomainName']) ? $options['cloudFrontDomainName'] : $this->cloudFrontDomainName;
+		$this->objectAcl = isset($options['objectAcl']) ? $options['objectAcl'] : $this->objectAcl;
 	}
 
 	/**
@@ -106,21 +117,25 @@ class AwsS3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	public function publishCollection(Collection $collection) {
 		$storage = $collection->getStorage();
 
-		if ($storage instanceof AwsS3Storage) {
-			return;
-		} else if ($storage instanceof PackageStorage) {
+		if ($storage instanceof PackageStorage) {
 			foreach ($storage->getPublicResourcePaths() as $packageKey => $path) {
 				$this->publishDirectory($path, $packageKey);
 			}
 		} else {
+		    if ($storage instanceof AwsS3Storage && $storage->getBucketname() === $this->bucketName) {
+		        // we can skip publishing if the storage and publishing target use the same bucket
+		        return;
+		    }
+		    
 			foreach ($collection->getObjects() as $object) {
-				/** @var \TYPO3\Flow\Resource\Storage\Object $object */
-				$sourceStream = $object->getStream();
-				if ($sourceStream === FALSE) {
-					throw new Exception(sprintf('Could not publish resource %s with SHA1 hash %s of collection %s because there seems to be no corresponding data in the storage.', $object->getFilename(), $object->getSha1(), $collection->getName()), 1417168142);
-				}
-				$this->publishFile($sourceStream, $this->getRelativePublicationPathAndFilename($object));
-				fclose($sourceStream);
+			    /** @var \TYPO3\Flow\Resource\Storage\Object $object */
+        		$sourceStream = $object->getStream();
+        		if ($sourceStream === FALSE) {
+        			throw new \TYPO3\Flow\Resource\Exception(sprintf('Could not publish resource %s with SHA1 hash %s of collection %s because there seems to be no corresponding data in the storage.', $object->getFilename(), $object->getSha1(), $collection->getName()), 1417168142);
+        		}
+        
+        		$relativePathAndFilename = $this->getRelativePublicationPathAndFilename($object);
+				$this->publishFile($sourceStream, $relativePathAndFilename);
 			}
 		}
 	}
@@ -134,9 +149,20 @@ class AwsS3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @throws Exception
 	 */
 	public function publishResource(Resource $resource, CollectionInterface $collection) {
-		if ($collection->getStorage() instanceof AwsS3Storage) {
-			return;
+	    $storage = $collection->getStorage();
+	    
+		if ($storage instanceof AwsS3Storage && $storage->getBucketname() === $this->bucketName) {
+		    // we can skip publishing if the storage and publishing target use the same bucket
+		    return;
 		}
+
+		$sourceStream = $resource->getStream();
+		if ($sourceStream === FALSE) {
+			throw new \TYPO3\Flow\Resource\Exception(sprintf('Could not publish resource %s with SHA1 hash %s of collection %s because there seems to be no corresponding data in the storage.', $object->getFilename(), $object->getSha1(), $collection->getName()), 1417168142);
+		}
+
+		$relativePathAndFilename = $this->getRelativePublicationPathAndFilename($object);
+		$this->publishFile($sourceStream, $relativePathAndFilename);
 	}
 
 	/**
@@ -146,9 +172,12 @@ class AwsS3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @return void
 	 */
 	public function unpublishResource(Resource $resource) {
-		if ($collection->getStorage() instanceof AwsS3Storage) {
+		// @todo: do we need to check if target == storage?
+		$resources = $this->resourceRepository->findSimilarResources($resource);
+		if (count($resources) > 1) {
 			return;
 		}
+		$this->unpublishFile($this->getRelativePublicationPathAndFilename($resource));
 	}
 
 	/**
@@ -158,7 +187,12 @@ class AwsS3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @return string The URI
 	 */
 	public function getPublicStaticResourceUri($relativePathAndFilename) {
-
+	    var_dump($this->cloudFrontDomainName);
+        if (!empty($this->cloudFrontDomainName)) {
+            return 'https://' . $this->cloudFrontDomainName . '/' . $relativePathAndFilename;
+        }
+        
+        return $this->client->getObjectUrl($this->bucketName, $relativePathAndFilename);
 	}
 
 	/**
@@ -169,9 +203,50 @@ class AwsS3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @throws Exception
 	 */
 	public function getPublicPersistentResourceUri(Resource $resource) {
-
+        if (!empty($this->cloudFrontDomainName)) {
+            return 'https://' . $this->cloudFrontDomainName . '/' . $relativePathAndFilename;
+        }
+        
+        return $this->client->getObjectUrl($this->bucketName, $relativePathAndFilename);
 	}
 
+	/**
+	 * Publishes the given source stream to this target, with the given relative path.
+	 *
+	 * @param resource $sourceStream Stream of the source to publish
+	 * @param string $relativeTargetPathAndFilename relative path and filename in the target directory
+	 * @return void
+	 */
+	protected function publishFile($sourceStream, $relativeTargetPathAndFilename) {
+		$this->client->upload($this->bucketName, $relativeTargetPathAndFilename, $sourceStream, $this->objectAcl);
+	}
+
+	/**
+	 * Publishes the specified directory to this target, with the given relative path.
+	 *
+	 * @param string $sourcePath Absolute path to the source directory
+	 * @param string $relativeTargetPath relative path in the target directory
+	 * @return void
+	 */
+	protected function publishDirectory($sourcePath, $relativeTargetPath) {
+		$this->client->uploadDirectory($sourcePath, $this->bucketName, $relativeTargetPath, array('ACL' => $this->objectAcl));
+	}
+	
+	/**
+	 * Removes the specified target file from the S3 bucket
+	 *
+	 * This method fails silently if the given file could not be unpublished or already didn't exist anymore.
+	 *
+	 * @param string $relativeTargetPathAndFilename relative path and filename in the target directory
+	 * @return void
+	 */
+	protected function unpublishFile($relativeTargetPathAndFilename) {
+		$this->client->DeleteObject(array(
+		    'Bucket' => $this->bucketName,
+		    'Key' => $relativeTargetPathAndFilename
+		));
+	}
+	
 	/**
 	 * Determines and returns the relative path and filename for the given Storage Object or Resource. If the given
 	 * object represents a persistent resource, its own relative publication path will be empty. If the given object
@@ -194,29 +269,6 @@ class AwsS3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 			}
 		}
 		return $pathAndFilename;
-	}
-
-	/**
-	 * Publishes the given source stream to this target, with the given relative path.
-	 *
-	 * @param resource $sourceStream Stream of the source to publish
-	 * @param string $relativeTargetPathAndFilename relative path and filename in the target directory
-	 * @return void
-	 */
-	protected function publishFile($sourceStream, $relativeTargetPathAndFilename) {
-
-	}
-
-	/**
-	 * Publishes the specified directory to this target, with the given relative path.
-	 *
-	 * @param string $sourcePath Absolute path to the source directory
-	 * @param string $relativeTargetPath relative path in the target directory
-	 * @return void
-	 */
-	protected function publishDirectory($sourcePath, $relativeTargetPath) {
-		echo 'Upload directory ' . $sourcePath;
-		$this->client->uploadDirectory($sourcePath, $this->bucketName, $relativeTargetPath);
 	}
 
 }

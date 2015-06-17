@@ -12,7 +12,7 @@ use TYPO3\Flow\Resource\Resource;
 /**
  * A resource storage based on Aws S3
  */
-class AwsS3Storage implements \TYPO3\Flow\Resource\Storage\WritableStorageInterface {
+class S3Storage implements \TYPO3\Flow\Resource\Storage\WritableStorageInterface {
 
 	/**
 	 * Name which identifies this resource storage
@@ -71,6 +71,15 @@ class AwsS3Storage implements \TYPO3\Flow\Resource\Storage\WritableStorageInterf
 	 */
 	public function getName() {
 		return $this->name;
+	}
+	
+	/**
+	 * Returns name of the bucket this storage uses
+	 * 
+	 * @return string
+	 */
+	public function getBucketName() {
+	    return $this->bucketname;
 	}
 
 	/**
