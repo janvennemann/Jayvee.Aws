@@ -10,6 +10,9 @@ use TYPO3\Flow\Resource\CollectionInterface;
 use TYPO3\Flow\Resource\Collection;
 use TYPO3\Flow\Resource\Resource;
 use TYPO3\Flow\Resource\ResourceMetaDataInterface;
+use TYPO3\Flow\Resource\Storage\StorageInterface;
+use TYPO3\Flow\Resource\Storage\PackageStorage;
+use Jayvee\Aws\Resource\Storage\S3Storage;
 
 /**
  * A target which publishes resources to a specific bucket on Aws S3
@@ -29,25 +32,31 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @var string
 	 */
 	protected $bucketName;
-	
+
 	/**
 	 * CloudFront distribution domain name or CNAME
-	 * 
+	 *
 	 * @var string
 	 */
 	protected $cloudFrontDomainName;
-	
+
 	/**
 	 * Default ACL for new bucket objects. Change this to private if you
-	 * want to use CloudFront with and origin access identity
+	 * want to use CloudFront with an origin access identity
 	 */
 	protected $objectAcl = 'public-read';
-	
+
 	/**
 	 * @Flow\Inject
 	 * @var \TYPO3\Flow\Resource\ResourceRepository
 	 */
 	protected $resourceRepository;
+
+	/**
+	 * @Flow\Inject
+	 * @var \TYPO3\Flow\Resource\ResourceManager
+	 */
+	protected $resourceManager;
 
 	/**
 	 * @Flow\Inject
@@ -63,6 +72,12 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	protected $client;
 
 	/**
+	 * @Flow\Inject
+	 * @var \TYPO3\Flow\Log\SystemLoggerInterface
+	 */
+	protected $systemLogger;
+
+	/**
 	 * Constructor
 	 *
 	 * @param string $name Name of this storage instance, according to the resource settings
@@ -72,10 +87,10 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 		$this->name = $name;
 
 		if (!isset($options['bucketName'])) {
-			throw new \Jayvee\Aws\Resource\Exception\InvalidBucketException('You must specify a bucket name for this storage with the "bucketName" option.', 1434532112);
+			throw new \Jayvee\Aws\Resource\Exception\InvalidBucketException('You must specify a bucket name for this publication target with the "bucketName" option.', 1434532112);
 		}
 		$this->bucketName = $options['bucketName'];
-		
+
 		$this->cloudFrontDomainName = isset($options['cloudFrontDomainName']) ? $options['cloudFrontDomainName'] : $this->cloudFrontDomainName;
 		$this->objectAcl = isset($options['objectAcl']) ? $options['objectAcl'] : $this->objectAcl;
 	}
@@ -84,7 +99,7 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * Initializes this publishing target
 	 *
 	 * @return void
-	 * @throws \TYPO3\Flow\Resource\Exception
+	 * @throws \Jayvee\Aws\Resource\Exception\InvalidBucketException
 	 */
 	public function initializeObject() {
 		$this->client = $this->awsFactory->create('S3');
@@ -122,19 +137,14 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 				$this->publishDirectory($path, $packageKey);
 			}
 		} else {
-		    if ($storage instanceof AwsS3Storage && $storage->getBucketname() === $this->bucketName) {
-		        // we can skip publishing if the storage and publishing target use the same bucket
-		        return;
-		    }
-		    
 			foreach ($collection->getObjects() as $object) {
-			    /** @var \TYPO3\Flow\Resource\Storage\Object $object */
-        		$sourceStream = $object->getStream();
-        		if ($sourceStream === FALSE) {
-        			throw new \TYPO3\Flow\Resource\Exception(sprintf('Could not publish resource %s with SHA1 hash %s of collection %s because there seems to be no corresponding data in the storage.', $object->getFilename(), $object->getSha1(), $collection->getName()), 1417168142);
-        		}
-        
-        		$relativePathAndFilename = $this->getRelativePublicationPathAndFilename($object);
+				/** @var \TYPO3\Flow\Resource\Storage\Object $object */
+				$sourceStream = $object->getStream();
+				if ($sourceStream === FALSE) {
+					throw new \TYPO3\Flow\Resource\Exception(sprintf('Could not publish resource %s with SHA1 hash %s of collection %s because there seems to be no corresponding data in the storage.', $object->getFilename(), $object->getSha1(), $collection->getName()), 1417168142);
+				}
+
+				$relativePathAndFilename = $this->getRelativePublicationPathAndFilename($object);
 				$this->publishFile($sourceStream, $relativePathAndFilename);
 			}
 		}
@@ -149,20 +159,18 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @throws Exception
 	 */
 	public function publishResource(Resource $resource, CollectionInterface $collection) {
-	    $storage = $collection->getStorage();
-	    
-		if ($storage instanceof AwsS3Storage && $storage->getBucketname() === $this->bucketName) {
-		    // we can skip publishing if the storage and publishing target use the same bucket
-		    return;
-		}
-
 		$sourceStream = $resource->getStream();
 		if ($sourceStream === FALSE) {
 			throw new \TYPO3\Flow\Resource\Exception(sprintf('Could not publish resource %s with SHA1 hash %s of collection %s because there seems to be no corresponding data in the storage.', $object->getFilename(), $object->getSha1(), $collection->getName()), 1417168142);
 		}
 
-		$relativePathAndFilename = $this->getRelativePublicationPathAndFilename($object);
-		$this->publishFile($sourceStream, $relativePathAndFilename);
+		$relativePathAndFilename = $this->getRelativePublicationPathAndFilename($resource);
+		$storage = $collection->getStorage();
+		if ($this->isStorageSameAsTarget($storage)) {
+			$this->publishFileByMakingItPublic($relativePathAndFilename);
+		} else {
+			$this->publishFile($sourceStream, $relativePathAndFilename);
+		}
 	}
 
 	/**
@@ -172,12 +180,23 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @return void
 	 */
 	public function unpublishResource(Resource $resource) {
-		// @todo: do we need to check if target == storage?
 		$resources = $this->resourceRepository->findSimilarResources($resource);
 		if (count($resources) > 1) {
 			return;
 		}
-		$this->unpublishFile($this->getRelativePublicationPathAndFilename($resource));
+
+		$collection = $this->resourceManager->getCollection($resource->getCollectionName());
+		if ($collection === NULL) {
+			return;
+		}
+
+		$relativePathAndFilename = $this->getRelativePublicationPathAndFilename($resource);
+		$storage = $collection->getStorage();
+		if ($this->isStorageSameAsTarget($storage)) {
+			$this->unpublishFileByMakingItPrivate($relativePathAndFilename);
+		} else {
+			$this->unpublishFile($relativePathAndFilename);
+		}
 	}
 
 	/**
@@ -187,12 +206,11 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @return string The URI
 	 */
 	public function getPublicStaticResourceUri($relativePathAndFilename) {
-	    var_dump($this->cloudFrontDomainName);
-        if (!empty($this->cloudFrontDomainName)) {
-            return 'https://' . $this->cloudFrontDomainName . '/' . $relativePathAndFilename;
-        }
-        
-        return $this->client->getObjectUrl($this->bucketName, $relativePathAndFilename);
+		if (!empty($this->cloudFrontDomainName)) {
+			return 'https://' . $this->cloudFrontDomainName . '/' . $relativePathAndFilename;
+		}
+
+		return $this->client->getObjectUrl($this->bucketName, $relativePathAndFilename);
 	}
 
 	/**
@@ -203,22 +221,58 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @throws Exception
 	 */
 	public function getPublicPersistentResourceUri(Resource $resource) {
-        if (!empty($this->cloudFrontDomainName)) {
-            return 'https://' . $this->cloudFrontDomainName . '/' . $relativePathAndFilename;
-        }
-        
-        return $this->client->getObjectUrl($this->bucketName, $relativePathAndFilename);
+		if (!empty($this->cloudFrontDomainName)) {
+			return 'https://' . $this->cloudFrontDomainName . '/' . $resource->getSha1();
+		}
+
+		return $this->client->getObjectUrl($this->bucketName, $resource->getSha1());
+	}
+
+	/**
+	 * Checks if the given storage uses the same bucket as this target
+	 *
+	 * @param StorageInterface $storage The storage to check against
+	 * @return boolean [description]
+	 */
+	protected function isStorageSameAsTarget(StorageInterface $storage) {
+		return $storage instanceof S3Storage && $storage->getBucketname() === $this->bucketName;
+	}
+
+	/**
+	 * Publishes the given bucket object by setting its ACL to public-read
+	 *
+	 * If this target is set to use CloudFront with an origin access identity this method does nothing,
+	 * since the origin access identity should have read permissions to your bucket.
+	 *
+	 * @fixme Remove bucket policy and handle origin access identitfy per object?
+	 *
+	 * @param string $relativeTargetPathAndFilename relative path and filename in the target file
+	 * @return void
+	 */
+	protected function publishFileByMakingItPublic($relativeTargetPathAndFilename) {
+		if (!empty($this->cloudFrontDomainName) && $this->objectAcl === 'private') {
+			return;
+		}
+
+		$this->client->putObjectAcl(array(
+			'Key' => $relativeTargetPathAndFilename,
+			'ACL' => 'public-read'
+		));
+
+		$this->systemLogger->log(sprintf('S3Target: Published file by making it public. (target: %s, file: %s)', $this->name, $relativeTargetPathAndFilename), LOG_DEBUG);
 	}
 
 	/**
 	 * Publishes the given source stream to this target, with the given relative path.
 	 *
 	 * @param resource $sourceStream Stream of the source to publish
-	 * @param string $relativeTargetPathAndFilename relative path and filename in the target directory
+	 * @param string $relativeTargetPathAndFilename relative path and filename in the target file
 	 * @return void
 	 */
 	protected function publishFile($sourceStream, $relativeTargetPathAndFilename) {
 		$this->client->upload($this->bucketName, $relativeTargetPathAndFilename, $sourceStream, $this->objectAcl);
+
+		$this->systemLogger->log(sprintf('S3Target: Published file. (target: %s, file: %s)', $this->name, $relativeTargetPathAndFilename), LOG_DEBUG);
 	}
 
 	/**
@@ -229,9 +283,39 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @return void
 	 */
 	protected function publishDirectory($sourcePath, $relativeTargetPath) {
-		$this->client->uploadDirectory($sourcePath, $this->bucketName, $relativeTargetPath, array('ACL' => $this->objectAcl));
+		$acl = $this->objectAcl;
+		$this->client->deleteMatchingObjects($this->bucketName, $relativeTargetPath);
+		$this->client->uploadDirectory($sourcePath, $this->bucketName, $relativeTargetPath, array(
+			'before' => function(\Aws\CommandInterface $command) use ($acl) {
+				$command['ACL'] = $acl;
+			}
+		));
 	}
-	
+
+	/**
+	 * Unpublishes the given bucket object by setting its ACL to private
+	 *
+	 * If this target is set to use CloudFront with an origin access identity this method does nothing,
+	 * since the origin access identity should have read permissions to your bucket.
+	 *
+	 * @fixme Remove bucket policy and handle origin access identitfy per object?
+	 *
+	 * @param string $relativeTargetPathAndFilename relative path and filename in the target file
+	 * @return void
+	 */
+	protected function unpublishFileByMakingItPrivate($relativeTargetPathAndFilename) {
+		if (!empty($this->cloudFrontDomainName) && $this->objectAcl === 'private') {
+			return;
+		}
+
+		$this->client->putObjectAcl(array(
+			'Key' => $relativeTargetPathAndFilename,
+			'ACL' => 'private'
+		));
+
+		$this->systemLogger->log(sprintf('S3Target: Unpublished file by making it private. (target: %s, file: %s)', $this->name, $relativeTargetPathAndFilename), LOG_DEBUG);
+	}
+
 	/**
 	 * Removes the specified target file from the S3 bucket
 	 *
@@ -241,12 +325,14 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @return void
 	 */
 	protected function unpublishFile($relativeTargetPathAndFilename) {
-		$this->client->DeleteObject(array(
-		    'Bucket' => $this->bucketName,
-		    'Key' => $relativeTargetPathAndFilename
+		$this->client->deleteObject(array(
+			'Bucket' => $this->bucketName,
+			'Key' => $relativeTargetPathAndFilename
 		));
+
+		$this->systemLogger->log(sprintf('S3Target: Unpublished file. (target: %s, file: %s)', $this->name, $relativeTargetPathAndFilename), LOG_DEBUG);
 	}
-	
+
 	/**
 	 * Determines and returns the relative path and filename for the given Storage Object or Resource. If the given
 	 * object represents a persistent resource, its own relative publication path will be empty. If the given object
@@ -262,11 +348,7 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 		if ($object->getRelativePublicationPath() !== '') {
 			$pathAndFilename = $object->getRelativePublicationPath() . $object->getFilename();
 		} else {
-			if ($this->subdivideHashPathSegment) {
-				$pathAndFilename = wordwrap($object->getSha1(), 5, '/', TRUE) . '/' . $object->getFilename();
-			} else {
-				$pathAndFilename = $object->getSha1() . '/' . $object->getFilename();
-			}
+			$pathAndFilename = $object->getSha1();
 		}
 		return $pathAndFilename;
 	}
