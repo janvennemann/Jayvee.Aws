@@ -8,6 +8,8 @@ namespace Jayvee\Aws\Resource\Storage;
 use TYPO3\Flow\Annotations as Flow;
 use TYPO3\Flow\Resource\CollectionInterface;
 use TYPO3\Flow\Resource\Resource;
+use Jayvee\Aws\Resource\Exception;
+use TYPO3\Flow\Utility\Unicode\Functions as UnicodeFunctions;
 
 /**
  * A resource storage based on Aws S3
@@ -27,6 +29,12 @@ class S3Storage implements \TYPO3\Flow\Resource\Storage\WritableStorageInterface
 	 * @var string
 	 */
 	protected $bucketName;
+	
+	/**
+	 * @Flow\Inject
+	 * @var \TYPO3\Flow\Utility\Environment
+	 */
+	protected $environment;
 
 	/**
 	 * @Flow\Inject
@@ -39,6 +47,19 @@ class S3Storage implements \TYPO3\Flow\Resource\Storage\WritableStorageInterface
 	 * @var \TYPO3\Flow\Resource\ResourceRepository
 	 */
 	protected $resourceRepository;
+	
+	/**
+	 * @Flow\Inject
+	 * @var \Jayvee\Aws\AwsFactory
+	 */
+	protected $awsFactory;
+
+	/**
+	 * AWS S3 client
+	 *
+	 * @var \Aws\S3\S3Client
+	 */
+	protected $client;
 
 	/**
 	 * Constructor
@@ -50,16 +71,28 @@ class S3Storage implements \TYPO3\Flow\Resource\Storage\WritableStorageInterface
 	public function __construct($name, array $options = array()) {
 		$this->name = $name;
 
-		foreach ($options as $key => $value) {
-			switch ($key) {
-				case 'bucketName':
-					$this->$key = $value;
-					break;
-				default:
-					if ($value !== NULL) {
-						throw new Exception(sprintf('An unknown option "%s" was specified in the configuration of a resource AwsS3Storage. Please check your settings.', $key), 1361533187);
-					}
-			}
+		if (!isset($options['bucketName'])) {
+			throw new \Jayvee\Aws\Resource\Exception\InvalidBucketException('You must specify a bucket name for this storage with the "bucketName" option.', 1434532112);
+		}
+		$this->bucketName = $options['bucketName'];
+	}
+	
+	/**
+	 * Initializes this storage
+	 *
+	 * @return void
+	 * @throws \Jayvee\Aws\Resource\Exception\InvalidBucketException
+	 */
+	public function initializeObject() {
+		$this->client = $this->awsFactory->create('S3');
+
+		if (!\Aws\S3\S3Client::isBucketDnsCompatible($this->bucketName)) {
+			throw new \Jayvee\Aws\Resource\Exception\InvalidBucketException('The name "' . $this->bucketName . '" is not a valid bucket name.', 1434503713);
+		}
+
+		if (!$this->client->doesBucketExist($this->bucketName, false)) {
+			$this->client->createBucket(['Bucket' => $this->bucketName]);
+			$this->client->waitUntil('BucketExists', ['Bucket' => $this->bucketName]);
 		}
 	}
 
@@ -79,7 +112,7 @@ class S3Storage implements \TYPO3\Flow\Resource\Storage\WritableStorageInterface
 	 * @return string
 	 */
 	public function getBucketName() {
-	    return $this->bucketname;
+		return $this->bucketname;
 	}
 
 	/**
@@ -91,7 +124,8 @@ class S3Storage implements \TYPO3\Flow\Resource\Storage\WritableStorageInterface
 	 * @api
 	 */
 	public function getStreamByResource(Resource $resource) {
-
+		$resourceUri = 's3://' . $this->bucketName . '/' . $resource->getSha1();
+		return (file_exists($resourceUri) ? fopen($resourceUri, 'rb') : FALSE);
 	}
 
 	/**
@@ -103,7 +137,7 @@ class S3Storage implements \TYPO3\Flow\Resource\Storage\WritableStorageInterface
 	 * @api
 	 */
 	public function getStreamByResourcePath($relativePath) {
-
+		// @fixme: what it is this good for?
 	}
 
 	/**
@@ -113,7 +147,11 @@ class S3Storage implements \TYPO3\Flow\Resource\Storage\WritableStorageInterface
 	 * @api
 	 */
 	public function getObjects() {
-
+		$objects = array();
+		foreach ($this->resourceManager->getCollectionsByStorage($this) as $collection) {
+			$objects = array_merge($objects, $this->getObjectsByCollection($collection));
+		}
+		return $objects;
 	}
 
 	/**
@@ -124,7 +162,19 @@ class S3Storage implements \TYPO3\Flow\Resource\Storage\WritableStorageInterface
 	 * @api
 	 */
 	public function getObjectsByCollection(CollectionInterface $collection) {
-
+		$objects = array();
+		$that = $this;
+		foreach ($this->resourceRepository->findByCollectionName($collection->getName()) as $resource) {
+			/** @var \TYPO3\Flow\Resource\Resource $resource */
+			$object = new Object();
+			$object->setFilename($resource->getFilename());
+			$object->setSha1($resource->getSha1());
+			$object->setMd5($resource->getMd5());
+			$object->setFileSize($resource->getFileSize());
+			$object->setStream(function () use ($that, $resource) { return $that->getStreamByResource($resource); } );
+			$objects[] = $object;
+		}
+		return $objects;
 	}
 
 	/**
@@ -138,7 +188,25 @@ class S3Storage implements \TYPO3\Flow\Resource\Storage\WritableStorageInterface
 	 * @return Resource A resource object representing the imported resource
 	 */
 	public function importResource($source, $collectionName) {
+		$temporaryTargetPathAndFilename = $this->environment->getPathToTemporaryDirectory() . uniqid('TYPO3_Flow_ResourceImport_');
 
+		if (is_resource($source)) {
+			try {
+				$target = fopen($temporaryTargetPathAndFilename, 'wb');
+				stream_copy_to_stream($source, $target);
+				fclose($target);
+			} catch (\Exception $e) {
+				throw new Exception(sprintf('Could import the content stream to temporary file "%s".', $temporaryTargetPathAndFilename), 1434639470);
+			}
+		} else {
+			try {
+				copy($source, $temporaryTargetPathAndFilename);
+			} catch (\Exception $e) {
+				throw new Exception(sprintf('Could not copy the file from "%s" to temporary file "%s".', $source, $temporaryTargetPathAndFilename), 1434639485);
+			}
+		}
+
+		return $this->importTemporaryFile($temporaryTargetPathAndFilename, $collectionName);
 	}
 
 	/**
@@ -156,7 +224,14 @@ class S3Storage implements \TYPO3\Flow\Resource\Storage\WritableStorageInterface
 	 * @throws Exception
 	 */
 	public function importResourceFromContent($content, $collectionName) {
+		$temporaryTargetPathAndFilename = $this->environment->getPathToTemporaryDirectory() . uniqid('TYPO3_Flow_ResourceImport_');
+		try {
+			file_put_contents($temporaryTargetPathAndFilename, $content);
+		} catch (\Exception $e) {
+			throw new Exception(sprintf('Could import the content stream to temporary file "%s".', $temporaryTargetPathAndFilename), 1381156098);
+		}
 
+		return $this->importTemporaryFile($temporaryTargetPathAndFilename, $collectionName);
 	}
 
 	/**
@@ -166,7 +241,35 @@ class S3Storage implements \TYPO3\Flow\Resource\Storage\WritableStorageInterface
 	 * @return boolean TRUE if removal was successful
 	 */
 	public function deleteResource(Resource $resource) {
+		$result = $this->client->deleteObject([
+			'Bucket' => $this->bucketName,
+			'Key' => $resource->getSha1()
+		]);
 
+		return TRUE;
+	}
+	
+	/**
+	 * Imports the given temporary file into the storage and creates the new resource object.
+	 *
+	 * @param string $temporaryFile
+	 * @param string $collectionName
+	 * @return Resource
+	 * @throws Exception
+	 */
+	protected function importTemporaryFile($temporaryFile, $collectionName) {
+		$sha1Hash = sha1_file($temporaryFile);
+		
+		$sourceStream = fopen($temporaryFile, 'r');
+		$result = $this->client->upload($this->bucketName, $sha1Hash, $sourceStream);
+
+		$resource = new Resource();
+		$resource->setFileSize(filesize($temporaryFile));
+		$resource->setCollectionName($collectionName);
+		$resource->setSha1($sha1Hash);
+		$resource->setMd5(md5_file($temporaryFile));
+
+		return $resource;
 	}
 
 }
