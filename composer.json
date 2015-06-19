@@ -1,14 +1,21 @@
 {
     "name": "jayvee/aws",
     "type": "typo3-flow-package",
-    "description": "Add description here",
+    "description": "Amazon Web Services integration for TYPO3 Flow",
+    "keywords": ["typo3", "flow", "typo3-flow", "aws", "amazon", "s3", "cloudfront", "cdn"],
+    "authors": [{
+        "name": "Jan Vennemann"
+    }],
     "require": {
-        "typo3/flow": ">=2.3@beta",
+        "typo3/flow": "~3.0@beta",
         "aws/aws-sdk-php": "~3.0.0"
     },
     "autoload": {
         "psr-0": {
             "Jayvee\\Aws": "Classes"
         }
+    },
+    "support": {
+        "issues": "https://github.com/janvennemann/Jayvee.Aws/issues"
     }
 }
