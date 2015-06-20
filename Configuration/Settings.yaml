@@ -6,13 +6,6 @@
 
 Jayvee:
   Aws:
-    key:
-    secret:
-    region:
-
-TYPO3:
-  Flow:
-    object:
-      excludeClasses:
-        'aws.awssdkphp': ['.*']
-        'guzzle.guzzle': ['.*']
+    #key: <access_key>
+    #secret: <secret_key>
+    #region: <preferred_region>
