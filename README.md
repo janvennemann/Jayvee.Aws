@@ -31,7 +31,7 @@ The resource storage and publishing target can be defined within the settings of
 TYPO3:
   Flow:
     resource:
-      storage:
+      storages:
         s3PersistentResourcesStorage:
           storage: 'Jayvee\Aws\Resource\Storage\S3Storage'
           storageOptions:
