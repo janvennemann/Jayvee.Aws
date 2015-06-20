@@ -14,10 +14,14 @@ The recommended way to authenticate is to use instance profile credentials or en
 ```yaml
 Jayvee:
   Aws:
-    key: <access_key>
-    secret: <secret_key>
-    region: <preferred_region>
+    sdk:
+      credentials:
+        key: <access_key>
+        secret: <secret_key>
+      region: <preferred_region>
 ```
+
+There is also an option to set your preferred AWS region, which defaults to `eu-east-1`if not set.
 
 ### Resource storage
 
