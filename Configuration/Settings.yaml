@@ -6,6 +6,8 @@
 
 Jayvee:
   Aws:
-    #key: <access_key>
-    #secret: <secret_key>
-    #region: <preferred_region>
+    sdk:
+      #credentials:
+      #  key: <access_key>
+      #  secret: <secret_key>
+      #region: <preferred_region>

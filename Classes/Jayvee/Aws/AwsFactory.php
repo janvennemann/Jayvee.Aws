@@ -40,15 +40,15 @@ class AwsFactory {
 	 * Initalize the aws factory
 	 */
 	public function initializeObject() {
-		if (isset($this->settings['key']) && isset($this->settings['secret'])) {
-			$key = $this->settings['key'];
-			$secret = $this->settings['secret'];
+		if (isset($this->settings['sdk']['credentials'])) {
+			$key = $this->settings['sdk']['credentials']['key'];
+			$secret = $this->settings['sdk']['credentials']['secret'];
 			$credentialProvider = CredentialProvider::fromCredentials(new Credentials($key, $secret));
 		} else {
 			$credentialProvider = CredentialProvider::defaultProvider();
 		}
 
-		$region = isset($this->settings['region']) ? $this->settings['region'] : 'eu-east-1';
+		$region = isset($this->settings['sdk']['region']) ? $this->settings['sdk']['region'] : 'eu-east-1';
 		$config = array(
 			'region'  => $region,
     		'version' => 'latest',
