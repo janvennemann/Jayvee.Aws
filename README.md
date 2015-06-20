@@ -1,6 +1,8 @@
 # Amazon Web Services integration for TYPO3 Flow 
 This packages provides you with a S3 resource storage and publishing target for the new TYPO3 Flow resource management. It also comes with handy little factory, which you can use to easily create clients for the various services.
 
+**WARNING** This package is still under development. The configuration options may change or some things may not work as expected. Do not use this in an production environment.
+
 ## Installation
 
 Just add the `jayvee/aws` package as a requirement to your root composer.json and run a `composer update` to install this package.
