@@ -9,6 +9,7 @@ use TYPO3\Flow\Annotations as Flow;
 use TYPO3\Flow\Resource\CollectionInterface;
 use TYPO3\Flow\Resource\Resource;
 use Jayvee\Aws\Resource\Exception;
+use TYPO3\Flow\Resource\Storage\Object;
 use TYPO3\Flow\Utility\Unicode\Functions as UnicodeFunctions;
 
 /**
@@ -112,7 +113,7 @@ class S3Storage implements \TYPO3\Flow\Resource\Storage\WritableStorageInterface
 	 * @return string
 	 */
 	public function getBucketName() {
-		return $this->bucketname;
+		return $this->bucketName;
 	}
 
 	/**

@@ -48,11 +48,11 @@ class AwsFactory {
 			$credentialProvider = CredentialProvider::defaultProvider();
 		}
 
-		$region = isset($this->settings['sdk']['region']) ? $this->settings['sdk']['region'] : 'eu-east-1';
+		$region = isset($this->settings['sdk']['region']) ? $this->settings['sdk']['region'] : 'us-east-1';
 		$config = array(
 			'region'  => $region,
     		'version' => 'latest',
-    		'credentials' => $credentialProvider
+    		'credentials' => $credentialProvider,
     	);
 		$this->awsSdk = new Sdk($config);
 	}
