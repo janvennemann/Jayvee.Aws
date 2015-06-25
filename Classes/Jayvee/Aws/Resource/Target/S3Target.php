@@ -13,6 +13,7 @@ use TYPO3\Flow\Resource\ResourceMetaDataInterface;
 use TYPO3\Flow\Resource\Storage\StorageInterface;
 use TYPO3\Flow\Resource\Storage\PackageStorage;
 use Jayvee\Aws\Resource\Storage\S3Storage;
+use TYPO3\Flow\Utility\Arrays;
 
 /**
  * A target which publishes resources to a specific bucket on Aws S3
@@ -34,17 +35,23 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	protected $bucketName;
 
 	/**
-	 * CloudFront distribution domain name or CNAME
+	 * Wether or not to use CloudFront
 	 *
-	 * @var string
+	 * @var bool
 	 */
-	protected $cloudFrontDomainName;
+	protected $isCloudFrontEnabled = FALSE;
+
+    /**
+     * CloudFront settings array
+     *
+     * @var array
+     */
+	protected $cloudFrontSettings = array();
 
 	/**
-	 * Default ACL for new bucket objects. Change this to private if you
-	 * want to use CloudFront with an origin access identity
+	 * Value for the GrantRead option when publishing
 	 */
-	protected $objectAcl = 'public-read';
+	protected $grantRead;
 
 	/**
 	 * @Flow\Inject
@@ -69,7 +76,14 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 *
 	 * @var \Aws\S3\S3Client
 	 */
-	protected $client;
+	protected $s3Client;
+
+	/**
+	 * Aws CloudFront client
+	 *
+	 * @var \Aws\CloudFront\CloudFrontClient
+	 */
+	protected $cloudFrontClient;
 
 	/**
 	 * @Flow\Inject
@@ -91,8 +105,9 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 		}
 		$this->bucketName = $options['bucketName'];
 
-		$this->cloudFrontDomainName = isset($options['cloudFrontDomainName']) ? $options['cloudFrontDomainName'] : $this->cloudFrontDomainName;
-		$this->objectAcl = isset($options['objectAcl']) ? $options['objectAcl'] : $this->objectAcl;
+	    if (isset($options['cloudFront'])) {
+	        $this->cloudFrontSettings = $options['cloudFront'];
+	    }
 	}
 
 	/**
@@ -102,16 +117,11 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @throws \Jayvee\Aws\Resource\Exception\InvalidBucketException
 	 */
 	public function initializeObject() {
-		$this->client = $this->awsFactory->create('S3');
-
-		if (!\Aws\S3\S3Client::isBucketDnsCompatible($this->bucketName)) {
-			throw new \Jayvee\Aws\Resource\Exception\InvalidBucketException('The name "' . $this->bucketName . '" is not a valid bucket name.', 1434503713);
+		$this->initializeSimpleStorageService();
+		if ($this->cloudFrontSettings !== array()) {
+		    $this->initializeCloudFront();
 		}
-
-		if (!$this->client->doesBucketExist($this->bucketName, false)) {
-			$this->client->createBucket(['Bucket' => $this->bucketName]);
-			$this->client->waitUntil('BucketExists', ['Bucket' => $this->bucketName]);
-		}
+		$this->buildAccessControlPolicy();
 	}
 
 	/**
@@ -143,9 +153,14 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 				if ($sourceStream === FALSE) {
 					throw new \TYPO3\Flow\Resource\Exception(sprintf('Could not publish resource %s with SHA1 hash %s of collection %s because there seems to be no corresponding data in the storage.', $object->getFilename(), $object->getSha1(), $collection->getName()), 1417168142);
 				}
-
+				
 				$relativePathAndFilename = $this->getRelativePublicationPathAndFilename($object);
-				$this->publishFile($sourceStream, $relativePathAndFilename);
+        		$storage = $collection->getStorage();
+        		if ($this->isThisTargetSameAsStorage($storage)) {
+        			$this->publishFileByMakingItPublic($relativePathAndFilename);
+        		} else {
+        			$this->publishFile($sourceStream, $relativePathAndFilename);
+        		}
 			}
 		}
 	}
@@ -166,7 +181,7 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 
 		$relativePathAndFilename = $this->getRelativePublicationPathAndFilename($resource);
 		$storage = $collection->getStorage();
-		if ($this->isStorageSameAsTarget($storage)) {
+		if ($this->isThisTargetSameAsStorage($storage)) {
 			$this->publishFileByMakingItPublic($relativePathAndFilename);
 		} else {
 			$this->publishFile($sourceStream, $relativePathAndFilename);
@@ -192,7 +207,7 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 
 		$relativePathAndFilename = $this->getRelativePublicationPathAndFilename($resource);
 		$storage = $collection->getStorage();
-		if ($this->isStorageSameAsTarget($storage)) {
+		if ($this->isThisTargetSameAsStorage($storage)) {
 			$this->unpublishFileByMakingItPrivate($relativePathAndFilename);
 		} else {
 			$this->unpublishFile($relativePathAndFilename);
@@ -206,11 +221,11 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @return string The URI
 	 */
 	public function getPublicStaticResourceUri($relativePathAndFilename) {
-		if (!empty($this->cloudFrontDomainName)) {
-			return 'https://' . $this->cloudFrontDomainName . '/' . $relativePathAndFilename;
+		if ($this->isCloudFrontEnabled) {
+			return 'https://' . $this->cloudFrontSettings['domainName'] . '/' . $relativePathAndFilename;
 		}
 
-		return $this->client->getObjectUrl($this->bucketName, $relativePathAndFilename);
+		return $this->s3Client->getObjectUrl($this->bucketName, $relativePathAndFilename);
 	}
 
 	/**
@@ -221,11 +236,109 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @throws Exception
 	 */
 	public function getPublicPersistentResourceUri(Resource $resource) {
-		if (!empty($this->cloudFrontDomainName)) {
-			return 'https://' . $this->cloudFrontDomainName . '/' . $resource->getSha1();
+		if ($this->isCloudFrontEnabled) {
+			return 'https://' . $this->cloudFrontSettings['domainName'] . '/' . $resource->getSha1();
 		}
 
-		return $this->client->getObjectUrl($this->bucketName, $resource->getSha1());
+		return $this->s3Client->getObjectUrl($this->bucketName, $resource->getSha1());
+	}
+
+	/**
+	 * Initalizes the S3 client
+	 *
+	 * @return void
+	 */
+	protected function initializeSimpleStorageService() {
+	    $this->s3Client = $this->awsFactory->create('S3');
+
+		if (!\Aws\S3\S3Client::isBucketDnsCompatible($this->bucketName)) {
+			throw new \Jayvee\Aws\Resource\Exception\InvalidBucketException('The name "' . $this->bucketName . '" is not a valid bucket name.', 1434503713);
+		}
+
+		if (!$this->s3Client->doesBucketExist($this->bucketName, false)) {
+			$this->s3Client->createBucket(['Bucket' => $this->bucketName]);
+			$this->s3Client->waitUntil('BucketExists', ['Bucket' => $this->bucketName]);
+		}
+	}
+
+	/**
+	 * Initializes the CloudFront client
+	 *
+	 * @return void
+	 */
+	protected function initializeCloudFront() {
+        if (!isset($this->cloudFrontSettings['distributionIdentifier']) && !is_string($this->cloudFrontSettings['distributionIdentifier'])) {
+	        throw new \Jayvee\Aws\Resource\Exception(sprintf('Invalid CloudFront distribution identifier given for target %s.', $this->name), 1434801704);
+	    }
+
+	    $this->cloudFrontClient = $this->awsFactory->create('CloudFront', ['region' => 'us-east-1']);
+
+	    $distributionIdentifier = $this->cloudFrontSettings['distributionIdentifier'];
+	    $distributionData = $this->cloudFrontClient->getDistribution([
+            'Id' => $distributionIdentifier,
+        ]);
+        $origins = $distributionData->getPath('Distribution.DistributionConfig.Origins.Items');
+        $targetOrigin = NULL;
+        foreach($origins as $origin) {
+            if ($origin['DomainName'] === $this->bucketName . '.s3.amazonaws.com') {
+                $targetOrigin = $origin;
+                break;
+            }
+        }
+        if ($targetOrigin === NULL) {
+        	$comment = Arrays::getValueByPath($distributionData, 'Distribution.DistributionConfig.Comment');
+            throw new \Jayvee\Aws\Resource\Exception(sprintf('Could not find bucket %s as an origin in your CloudFront distribution %s (%).', $this->bucketName, $distributionIdentifier, $comment), 1434803791);
+        }
+        
+        $this->isCloudFrontEnabled = TRUE;
+        $this->cloudFrontSettings['domainName'] = $distributionData->getPath('Distribution.DomainName');
+        
+        $oaiString = Arrays::getValueByPath($targetOrigin, 'S3OriginConfig.OriginAccessIdentity');
+        if ($oaiString) {
+            $oai = substr($oaiString, strrpos($oaiString, '/') + 1);
+            $oaiData = $this->cloudFrontClient->getCloudFrontOriginAccessIdentity(['Id' => $oai]);
+            $oaiCanonicalUserId = $oaiData->getPath('CloudFrontOriginAccessIdentity.S3CanonicalUserId');
+            $this->cloudFrontSettings['oaiCanonicalUserId'] = $oaiCanonicalUserId;
+        }
+	}
+
+	/**
+	 * Builds the access control policy used for publishing resources
+	 *
+	 * @return void
+	 */
+	protected function buildAccessControlPolicy() {
+	    if (isset($this->cloudFrontSettings['oaiCanonicalUserId'])) {
+	        $this->accessControlPolicy = [
+    	        'Grants' => [[
+    	            'Grantee' => [
+    	                'DisplayName' => 'CloudFront Origin Access Identity',
+    	                'Type' => 'CanonicalUser',
+    	                'ID' => $this->cloudFrontSettings['oaiCanonicalUserId']
+    	            ],
+    	            'Permission' => 'READ'
+                ]]
+    	    ];
+	    } else {
+	        $this->accessControlPolicy = [
+    	        'Grants' => [[
+    	            'Grantee' => [
+    	                'DisplayName' => 'Everyone',
+    	                'Type' => 'Group',
+    	                'ID' => 'http://acs.amazonaws.com/groups/global/AllUsers'
+    	            ],
+    	            'Permission' => 'READ'
+                ]]
+    	    ];
+	    }
+	}
+	
+	protected function buildGrantReadFromAccessControlPolicy() {
+	    if ($this->accessControlPolicy['Grants'][0]['Grantee']['Type'] === 'CanonicalUser') {
+	        return 'id=' . $this->accessControlPolicy['Grants'][0]['Grantee']['ID'];
+	    } else {
+	        return 'uri=' . $this->accessControlPolicy['Grants'][0]['Grantee']['URI'];
+	    }
 	}
 
 	/**
@@ -234,30 +347,22 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @param StorageInterface $storage The storage to check against
 	 * @return boolean [description]
 	 */
-	protected function isStorageSameAsTarget(StorageInterface $storage) {
+	protected function isThisTargetSameAsStorage(StorageInterface $storage) {
 		return $storage instanceof S3Storage && $storage->getBucketname() === $this->bucketName;
 	}
 
 	/**
 	 * Publishes the given bucket object by setting its ACL to public-read
 	 *
-	 * If this target is set to use CloudFront with an origin access identity this method does nothing,
-	 * since the origin access identity should have read permissions to your bucket.
-	 *
-	 * @fixme Remove bucket policy and handle origin access identitfy per object?
-	 *
 	 * @param string $relativeTargetPathAndFilename relative path and filename in the target file
 	 * @return void
 	 */
 	protected function publishFileByMakingItPublic($relativeTargetPathAndFilename) {
-		if (!empty($this->cloudFrontDomainName) && $this->objectAcl === 'private') {
-			return;
-		}
-
-		$this->client->putObjectAcl(array(
+		$this->s3Client->putObjectAcl([
+		    'Bucket' => $this->bucketName,
 			'Key' => $relativeTargetPathAndFilename,
-			'ACL' => 'public-read'
-		));
+			'AccessControlPolicy' => $this->accessControlPolicy
+		]);
 
 		$this->systemLogger->log(sprintf('S3Target: Published file by making it public. (target: %s, file: %s)', $this->name, $relativeTargetPathAndFilename), LOG_DEBUG);
 	}
@@ -270,7 +375,11 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @return void
 	 */
 	protected function publishFile($sourceStream, $relativeTargetPathAndFilename) {
-		$this->client->upload($this->bucketName, $relativeTargetPathAndFilename, $sourceStream, $this->objectAcl);
+		$this->s3Client->upload($this->bucketName, $relativeTargetPathAndFilename, $sourceStream, 'private', [
+			'before' => function(\Aws\CommandInterface $command) {
+				$command['GrantRead'] = $this->buildGrantReadFromAccessControlPolicy();
+			}
+		]);
 
 		$this->systemLogger->log(sprintf('S3Target: Published file. (target: %s, file: %s)', $this->name, $relativeTargetPathAndFilename), LOG_DEBUG);
 	}
@@ -283,35 +392,25 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @return void
 	 */
 	protected function publishDirectory($sourcePath, $relativeTargetPath) {
-		$acl = $this->objectAcl;
-		$this->client->deleteMatchingObjects($this->bucketName, $relativeTargetPath);
-		$this->client->uploadDirectory($sourcePath, $this->bucketName, $relativeTargetPath, array(
-			'before' => function(\Aws\CommandInterface $command) use ($acl) {
-				$command['ACL'] = $acl;
+		$this->s3Client->deleteMatchingObjects($this->bucketName, $relativeTargetPath);
+		$this->s3Client->uploadDirectory($sourcePath, $this->bucketName, $relativeTargetPath, [
+			'before' => function(\Aws\CommandInterface $command) {
+				$command['GrantRead'] = $this->buildGrantReadFromAccessControlPolicy();
 			}
-		));
+		]);
 	}
 
 	/**
 	 * Unpublishes the given bucket object by setting its ACL to private
 	 *
-	 * If this target is set to use CloudFront with an origin access identity this method does nothing,
-	 * since the origin access identity should have read permissions to your bucket.
-	 *
-	 * @fixme Remove bucket policy and handle origin access identitfy per object?
-	 *
 	 * @param string $relativeTargetPathAndFilename relative path and filename in the target file
 	 * @return void
 	 */
 	protected function unpublishFileByMakingItPrivate($relativeTargetPathAndFilename) {
-		if (!empty($this->cloudFrontDomainName) && $this->objectAcl === 'private') {
-			return;
-		}
-
-		$this->client->putObjectAcl(array(
+		$this->s3Client->putObjectAcl([
 			'Key' => $relativeTargetPathAndFilename,
 			'ACL' => 'private'
-		));
+		]);
 
 		$this->systemLogger->log(sprintf('S3Target: Unpublished file by making it private. (target: %s, file: %s)', $this->name, $relativeTargetPathAndFilename), LOG_DEBUG);
 	}
@@ -325,10 +424,10 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	 * @return void
 	 */
 	protected function unpublishFile($relativeTargetPathAndFilename) {
-		$this->client->deleteObject(array(
+		$this->s3Client->deleteObject([
 			'Bucket' => $this->bucketName,
 			'Key' => $relativeTargetPathAndFilename
-		));
+		]);
 
 		$this->systemLogger->log(sprintf('S3Target: Unpublished file. (target: %s, file: %s)', $this->name, $relativeTargetPathAndFilename), LOG_DEBUG);
 	}
