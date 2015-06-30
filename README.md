@@ -61,7 +61,7 @@ TYPO3:
 
 #### Adding CloudFront support
 
-To serve your files via CloudFront and not directly from your S3 bucket, just add the CloudFront domain name or cname of the distribution you want to use with the `cloudFrontDomainName` option. Since creating a distribution is a longer running task, you will have to set it up yourself and set the S3 bucket as its origin.
+To serve your files via CloudFront and not directly from your S3 bucket, add the identifier of the distribution you want to use with the `cloudFront` option. Since creating a distribution is a longer running task, you will have to set it up yourself and set the S3 bucket as its origin, e.g. via the AWS Console.
 
 ```yaml
 TYPO3:
@@ -72,8 +72,15 @@ TYPO3:
           target: 'Jayvee\Aws\Resource\Target\S3Target'
           targetOptions:
             bucketName: '<bucket_name>'
-            cloudFrontDomainName: 'xxxxxxxxx.cloudfront.com'
-            originAccessIdentiyEnabled: true
+            cloudFront:
+              distributionIdentifier: '<distribution>
 ```
 
-The option `originAccessIdentiyEnabled` is only needed if you want to use a origin access identity. It defaults to `false` if not set.
+The target will read your distribution configuration and automatically use an origin access identity if available. Please note that you do not need to setup a bucket policy for the origin access identity since the permissions will be granted per object.
+
+## What's next?
+
+The follwing features a already planned and will be available shortly
+
+* More CloudFront options like using CNAMEs or issuing invalidation requests upon resource unpublishing
+* Configure caching options on both storages and publishing targets
