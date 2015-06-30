@@ -12,8 +12,9 @@ use TYPO3\Flow\Resource\Resource;
 use TYPO3\Flow\Resource\ResourceMetaDataInterface;
 use TYPO3\Flow\Resource\Storage\StorageInterface;
 use TYPO3\Flow\Resource\Storage\PackageStorage;
-use Jayvee\Aws\Resource\Storage\S3Storage;
 use TYPO3\Flow\Utility\Arrays;
+use Jayvee\Aws\Resource\Storage\S3Storage;
+use Jayvee\Aws\S3\PolicyBuilder;
 
 /**
  * A target which publishes resources to a specific bucket on Aws S3
@@ -47,11 +48,13 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
      * @var array
      */
 	protected $cloudFrontSettings = array();
-
+	
 	/**
-	 * Value for the GrantRead option when publishing
+	 * String identifying the all users group for S3 policies
+	 * 
+	 * @var string
 	 */
-	protected $grantRead;
+	protected $allUsersGroup = 'http://acs.amazonaws.com/groups/global/AllUsers';
 
 	/**
 	 * @Flow\Inject
@@ -121,7 +124,6 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 		if ($this->cloudFrontSettings !== array()) {
 		    $this->initializeCloudFront();
 		}
-		$this->buildAccessControlPolicy();
 	}
 
 	/**
@@ -303,49 +305,10 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	}
 
 	/**
-	 * Builds the access control policy used for publishing resources
-	 *
-	 * @return void
-	 */
-	protected function buildAccessControlPolicy() {
-	    if (isset($this->cloudFrontSettings['oaiCanonicalUserId'])) {
-	        $this->accessControlPolicy = [
-    	        'Grants' => [[
-    	            'Grantee' => [
-    	                'DisplayName' => 'CloudFront Origin Access Identity',
-    	                'Type' => 'CanonicalUser',
-    	                'ID' => $this->cloudFrontSettings['oaiCanonicalUserId']
-    	            ],
-    	            'Permission' => 'READ'
-                ]]
-    	    ];
-	    } else {
-	        $this->accessControlPolicy = [
-    	        'Grants' => [[
-    	            'Grantee' => [
-    	                'DisplayName' => 'Everyone',
-    	                'Type' => 'Group',
-    	                'ID' => 'http://acs.amazonaws.com/groups/global/AllUsers'
-    	            ],
-    	            'Permission' => 'READ'
-                ]]
-    	    ];
-	    }
-	}
-	
-	protected function buildGrantReadFromAccessControlPolicy() {
-	    if ($this->accessControlPolicy['Grants'][0]['Grantee']['Type'] === 'CanonicalUser') {
-	        return 'id=' . $this->accessControlPolicy['Grants'][0]['Grantee']['ID'];
-	    } else {
-	        return 'uri=' . $this->accessControlPolicy['Grants'][0]['Grantee']['URI'];
-	    }
-	}
-
-	/**
 	 * Checks if the given storage uses the same bucket as this target
 	 *
 	 * @param StorageInterface $storage The storage to check against
-	 * @return boolean [description]
+	 * @return boolean
 	 */
 	protected function isThisTargetSameAsStorage(StorageInterface $storage) {
 		return $storage instanceof S3Storage && $storage->getBucketname() === $this->bucketName;
@@ -361,7 +324,7 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 		$this->s3Client->putObjectAcl([
 		    'Bucket' => $this->bucketName,
 			'Key' => $relativeTargetPathAndFilename,
-			'AccessControlPolicy' => $this->accessControlPolicy
+			'AccessControlPolicy' => $this->buildAccessControlPolicyForPublishing($relativeTargetPathAndFilename)
 		]);
 
 		$this->systemLogger->log(sprintf('S3Target: Published file by making it public. (target: %s, file: %s)', $this->name, $relativeTargetPathAndFilename), LOG_DEBUG);
@@ -377,7 +340,7 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	protected function publishFile($sourceStream, $relativeTargetPathAndFilename) {
 		$this->s3Client->upload($this->bucketName, $relativeTargetPathAndFilename, $sourceStream, 'private', [
 			'before' => function(\Aws\CommandInterface $command) {
-				$command['GrantRead'] = $this->buildGrantReadFromAccessControlPolicy();
+				$command['GrantRead'] = $this->buildGrantRead();
 			}
 		]);
 
@@ -386,6 +349,8 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 
 	/**
 	 * Publishes the specified directory to this target, with the given relative path.
+	 * 
+	 * This will ony be used for static package resources
 	 *
 	 * @param string $sourcePath Absolute path to the source directory
 	 * @param string $relativeTargetPath relative path in the target directory
@@ -395,13 +360,13 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 		$this->s3Client->deleteMatchingObjects($this->bucketName, $relativeTargetPath);
 		$this->s3Client->uploadDirectory($sourcePath, $this->bucketName, $relativeTargetPath, [
 			'before' => function(\Aws\CommandInterface $command) {
-				$command['GrantRead'] = $this->buildGrantReadFromAccessControlPolicy();
+				$command['GrantRead'] = $this->buildGrantRead();
 			}
 		]);
 	}
 
 	/**
-	 * Unpublishes the given bucket object by setting its ACL to private
+	 * Unpublishes the given bucket object by making it private
 	 *
 	 * @param string $relativeTargetPathAndFilename relative path and filename in the target file
 	 * @return void
@@ -409,7 +374,7 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 	protected function unpublishFileByMakingItPrivate($relativeTargetPathAndFilename) {
 		$this->s3Client->putObjectAcl([
 			'Key' => $relativeTargetPathAndFilename,
-			'ACL' => 'private'
+			'AccessControlPolicy' => $this->buildAccessControlPolicyForUnpublishing($relativeTargetPathAndFilename)
 		]);
 
 		$this->systemLogger->log(sprintf('S3Target: Unpublished file by making it private. (target: %s, file: %s)', $this->name, $relativeTargetPathAndFilename), LOG_DEBUG);
@@ -450,6 +415,73 @@ class S3Target implements \TYPO3\Flow\Resource\Target\TargetInterface {
 			$pathAndFilename = $object->getSha1();
 		}
 		return $pathAndFilename;
+	}
+	
+	/**
+	 * Build a GrantRead string which can be used to allow read access to an object on s3
+	 * 
+	 * @return string
+	 */
+	protected function buildGrantRead() {
+	    if (isset($this->cloudFrontSettings['oaiCanonicalUserId'])) {
+	        return 'id=' . $this->cloudFrontSettings['oaiCanonicalUserId'];
+	    } else {
+	        return 'uri=' . $this->allUsersGroup;
+	    }
+	}
+	
+	/**
+	 * Builds the access control policy used for publishing a file
+	 * 
+	 * @param string $relativeTargetPathAndFilename The file for which the policy will be build
+	 * @return string
+	 */
+	protected function buildAccessControlPolicyForPublishing($relativeTargetPathAndFilename) {
+	    $result = $this->s3Client->getObjectAcl([
+	        'Bucket' => $this->bucketName,
+	        'Key' => $relativeTargetPathAndFilename
+	    ]);
+	    
+	    $existingPolicy = [
+	        'Owner' =>$result->get('Owner'),
+	        'Grants' => $result->get('Grants')
+	    ];
+	    
+	    $policyBuilder = PolicyBuilder::createWithExistingPolicy($existingPolicy);
+	    if (isset($this->cloudFrontSettings['oaiCanonicalUserId'])) {
+	        $policyBuilder->addCanonicalUser($this->cloudFrontSettings['oaiCanonicalUserId'], ['READ']);
+	    } else {
+	        $policyBuilder->addGroup($this->allUsersGroup, ['READ']);
+	    }
+	    
+	    return $policyBuilder->getPolicy();
+	}
+	
+	/**
+	 * Builds the access control policy used for unpublishing a file
+	 * 
+	 * @param string $relativeTargetPathAndFilename The file for which the policy will be build
+	 * @return string
+	 */
+	protected function buildAccessControlPolicyForUnpublishing($relativeTargetPathAndFilename) {
+	    $result = $this->s3Client->getObjectAcl([
+	        'Bucket' => $this->bucketName,
+	        'Key' => $relativeTargetPathAndFilename
+	    ]);
+	    
+	    $existingPolicy = [
+	        'Owner' =>$result->get('Owner'),
+	        'Grants' => $result->get('Grants')
+	    ];
+	    
+	    $policyBuilder = PolicyBuilder::createWithExistingPolicy($existingPolicy);
+	    if (isset($this->cloudFrontSettings['oaiCanonicalUserId'])) {
+	        $policyBuilder->removeCanonicalUser($this->cloudFrontSettings['oaiCanonicalUserId']);
+	    } else {
+	        $policyBuilder->removeGroup($this->allUsersGroup);
+	    }
+	    
+	    return $policyBuilder->getPolicy();
 	}
 
 }
