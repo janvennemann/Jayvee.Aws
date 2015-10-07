@@ -78,6 +78,19 @@ TYPO3:
 
 The target will read your distribution configuration and automatically use an origin access identity if available. Please note that you do not need to setup a bucket policy for the origin access identity since the permissions will be granted per object.
 
+## Troubleshooting
+
+Sometimes you may receive the following error during resource publishing:
+
+```
+An error occurred while publishing resources (see full description below). You can check and probably fix the integrity of the resource registry by using the resource:clean command.
+TYPO3\Flow\Error\Exception (Exception code: 1)
+Warning: file_put_contents(/tmp/aws-cache/data_s3_2006-03-01_paginators-1.json.php): failed to open stream: Permission denied in {...}/Packages/Libraries/aws/aws-sdk-php/src
+/JsonCompiler.php line 93
+```
+
+This is most likely due to incorrect permissions of the cache directory for the AWS SDK. Simply change the permissions or edit the `AWS_PHP_CACHE_DIR` environment variable to use another directory. A more detailed desciption can be found on the [AWS SDK for PHP FAQ](http://docs.aws.amazon.com/aws-sdk-php/v3/guide/faq.html#how-do-i-fix-an-error-related-to-aws-cache)
+
 ## What's next?
 
 The follwing features a already planned and will be available shortly
